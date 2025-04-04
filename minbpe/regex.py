@@ -11,6 +11,8 @@ Unlike BasicTokenizer:
 
 import regex as re
 from .base import Tokenizer, get_stats, merge
+from typing import List, Iterator
+import logging
 
 
 # the main GPT text split patterns, see
@@ -68,6 +70,89 @@ class RegexTokenizer(Tokenizer):
         # save class variables
         self.merges = merges # used in encode()
         self.vocab = vocab   # used in decode()
+
+    def train_from_iterator(self, iterator: Iterator[List[str]], vocab_size: int, verbose: bool = False, batch_processing_limit: int = None):
+        """
+        Train the tokenizer on batches of text from an iterator.
+        
+        Args:
+            iterator: Iterator yielding batches of text
+            vocab_size: Target vocabulary size (must be >= 256)
+            verbose: Whether to print progress information
+            batch_processing_limit: Optional limit on the number of batches to process
+            
+        This method allows training on datasets that are too large to fit in memory.
+        """
+        assert vocab_size >= 256
+        num_merges = vocab_size - 256
+        
+        # Initialize vocabulary with byte tokens
+        vocab = {idx: bytes([idx]) for idx in range(256)}
+        merges = {}  # (int, int) -> int
+        
+        # Process all text into token IDs
+        all_ids = []
+        batch_count = 0
+        
+        if verbose:
+            print("Processing batches for training...")
+            
+        for batch in iterator:
+            batch_count += 1
+            if batch_processing_limit and batch_count > batch_processing_limit:
+                if verbose:
+                    print(f"Reached batch processing limit of {batch_processing_limit}")
+                break
+                
+            if verbose and batch_count % 10 == 0:
+                print(f"Processing batch {batch_count}")
+                
+            # Process each text in the batch
+            for text in batch:
+                # Split the text using the regex pattern
+                text_chunks = re.findall(self.compiled_pattern, text)
+                # Convert each chunk to bytes then to IDs
+                chunk_ids = [list(ch.encode("utf-8")) for ch in text_chunks]
+                all_ids.extend(chunk_ids)
+        
+        if verbose:
+            print(f"Processed {batch_count} batches with {len(all_ids)} text chunks")
+            print(f"Beginning {num_merges} merges to reach vocab size {vocab_size}")
+        
+        # Now perform the merges
+        for i in range(num_merges):
+            # Count pair frequencies across all IDs
+            stats = {}
+            for chunk_ids in all_ids:
+                get_stats(chunk_ids, stats)
+                
+            if not stats:
+                if verbose:
+                    print(f"No more pairs to merge after {i} merges")
+                break
+                
+            # Find the most frequent pair
+            pair = max(stats, key=stats.get)
+            
+            # Mint a new token
+            idx = 256 + i
+            
+            # Replace all occurrences of the pair with the new token
+            all_ids = [merge(chunk_ids, pair, idx) for chunk_ids in all_ids]
+            
+            # Save the merge
+            merges[pair] = idx
+            vocab[idx] = vocab[pair[0]] + vocab[pair[1]]
+            
+            if verbose and (i+1) % 100 == 0:
+                print(f"merge {i+1}/{num_merges}: {pair} -> {idx} ({vocab[idx]}) had {stats[pair]} occurrences")
+        
+        # Save class variables
+        self.merges = merges
+        self.vocab = vocab
+        
+        if verbose:
+            print(f"Training complete. Vocabulary size: {len(vocab)}")
 
     def register_special_tokens(self, special_tokens):
         # special_tokens is a dictionary of str -> int

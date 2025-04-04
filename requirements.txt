@@ -1,2 +1,5 @@
-regex
-tiktoken
+regex>=2022.1.18
+datasets>=2.14.0
+# Optional dependencies for Huggingface conversion
+tokenizers>=0.13.3
+transformers>=4.30.0
