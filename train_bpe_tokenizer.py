@@ -23,9 +23,11 @@ def get_training_corpus():
 # Load the dataset
 print("Loading dataset...")
 
-# ds= load_dataset('ali-issa/arb_diacritized_tokenized_filtered_dataset_with_arb-bpe-tokenizer-32768')
-ds = load_dataset('dataset', cache_dir='./cache')
-print(f"Dataset loaded with {len(ds['train'])} examples")
+ds= load_dataset('ali-issa/arb_diacritized_tokenized_filtered_dataset_with_arb-bpe-tokenizer-32768')
+dataset_size=len(ds['train'])
+ds = ds['train'][:int(dataset_size//2)]
+# ds = load_dataset('dataset', cache_dir='./cache')
+print(f"Dataset loaded with {dataset_size} examples")
 
 # Print available columns to help choose the text column
 print(f"Available columns: {ds['train'].column_names}")
@@ -35,15 +37,13 @@ text_column = "diacritized_text"
 
 # Parameters for training
 vocab_size = 32768
-verbose = True
-
 # Create the tokenizer
 print(f"Training tokenizer with vocab size {vocab_size}...")
 tokenizer = RegexTokenizer()
 
 # Train using the memory-efficient iterator-based approach
 t0 = time.time()
-tokenizer.train_from_iterator(get_training_corpus(), vocab_size, verbose=verbose)
+tokenizer.train_from_iterator(get_training_corpus(), vocab_size)
 t1 = time.time()
 
 print(f"Training took {t1 - t0:.2f} seconds")
