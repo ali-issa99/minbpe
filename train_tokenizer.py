@@ -1,14 +1,17 @@
+# Create tokenizer
 from minbpe.regex import RegexTokenizer
 
-# Create tokenizer
+
 tokenizer = RegexTokenizer()
 
 # Train from a directory containing parquet files
 tokenizer.train_from_parquet_dir(
-    data_dir='data/corpus/',     # Directory containing your parquet files
-    text_column='text',          # Column in parquet files that contains the text
-    vocab_size=32768,             # Desired vocabulary size
-    verbose=True                 # Show progress information
+    data_dir='arb_diacritized_tokenized_filtered_dataset_with_arb-bpe-tokenizer-32768/train',
+    text_column='diacritized_text',
+    vocab_size=32768,
+    temp_dir='tokenizer_temp',
+    verbose=True,
+    chunk_size=10000  # Process 5000 rows at a time (smaller for less memory usage)
 )
 
 # Save the trained tokenizer

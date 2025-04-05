@@ -12,10 +12,10 @@ Unlike BasicTokenizer:
 from .base import Tokenizer, get_stats, merge
 from tqdm import tqdm
 import regex as re
-import pandas as pd
-import numpy as np
 import os
 import tempfile
+import pyarrow.parquet as pq
+import pyarrow as pa
 
 # the main GPT text split patterns, see
 # https://github.com/openai/tiktoken/blob/main/tiktoken_ext/openai_public.py
@@ -73,7 +73,18 @@ class RegexTokenizer(Tokenizer):
         self.merges = merges # used in encode()
         self.vocab = vocab   # used in decode()
     
-    def train_from_parquet(self, parquet_files, text_column, vocab_size, temp_dir=None, verbose=False):
+    def train_from_parquet(self, parquet_files, text_column, vocab_size, temp_dir=None, verbose=False, chunk_size=10000):
+        """
+        Train the tokenizer using parquet files as the data source with optimized performance.
+        
+        Args:
+            parquet_files: List of paths to parquet files
+            text_column: Name of the column containing text data in the parquet files
+            vocab_size: The final vocabulary size (including the 256 base tokens)
+            temp_dir: Directory to store temporary processed files (default: uses system temp dir)
+            verbose: Whether to print progress information
+            chunk_size: Number of rows to process at once (for memory efficiency)
+        """
         assert vocab_size >= 256
         num_merges = vocab_size - 256
         
@@ -95,22 +106,43 @@ class RegexTokenizer(Tokenizer):
             
             if verbose:
                 print(f"Initial processing of {parquet_file}")
+            
+            # Read the parquet file using PyArrow (only the text column)
+            parquet_dataset = pq.ParquetFile(parquet_file)
+            num_rows = parquet_dataset.metadata.num_rows
+            
+            # Process in chunks to save memory
+            all_token_ids = []
+            
+            for batch_i in range(0, num_rows, chunk_size):
+                # Read a chunk of data
+                row_group_i = batch_i // parquet_dataset.metadata.row_group.row_groups[0].num_rows
+                rows_to_read = min(chunk_size, num_rows - batch_i)
                 
-            # Load the parquet file
-            df = pd.read_parquet(parquet_file)
+                if row_group_i < parquet_dataset.num_row_groups:
+                    batch = parquet_dataset.read_row_group(row_group_i, columns=[text_column]).to_pandas()
+                else:
+                    # Handle case where row_group_i is out of bounds
+                    batch = next(parquet_dataset.iter_batches(batch_size=rows_to_read, columns=[text_column])).to_pandas()
+                
+                if verbose and batch_i == 0:
+                    print(f"  Processing chunks of {chunk_size} rows, total rows: {num_rows}")
+                
+                # Process text column
+                for text in tqdm(batch[text_column], desc=f"Processing chunk {batch_i//chunk_size + 1}/{(num_rows-1)//chunk_size + 1}"):
+                    if not isinstance(text, str):
+                        all_token_ids.append([])
+                        continue
+                    
+                    # Split using regex pattern and convert to byte IDs
+                    chunks = self.compiled_pattern.findall(text)
+                    token_ids = [list(ch.encode("utf-8")) for ch in chunks]
+                    all_token_ids.append(token_ids)
             
-            # Apply regex pattern and convert to bytes
-            def process_text(text):
-                if not isinstance(text, str):
-                    return []
-                chunks = self.compiled_pattern.findall(text)
-                return [list(ch.encode("utf-8")) for ch in chunks]
-            
-            # Process text column
-            df['token_ids'] = df[text_column].apply(process_text)
-            
-            # Save processed data
-            df[['token_ids']].to_parquet(processed_file)
+            # Save processed data using PyArrow
+            token_ids_arr = pa.array(all_token_ids)
+            table = pa.table([token_ids_arr], names=['token_ids'])
+            pq.write_table(table, processed_file)
             
             if verbose:
                 print(f"Saved processed data to {processed_file}")
@@ -126,13 +158,28 @@ class RegexTokenizer(Tokenizer):
                 if verbose:
                     print(f"Computing statistics for file {i+1}/{len(processed_files)}")
                 
-                # Load processed data
-                df = pd.read_parquet(processed_file)
+                # Read processed data with PyArrow
+                file_reader = pq.ParquetFile(processed_file)
+                num_rows = file_reader.metadata.num_rows
                 
-                # Compute statistics
-                for token_ids_list in tqdm(df['token_ids'], desc=f"Computing stats for file {i+1}"):
-                    for ids in token_ids_list:
-                            get_stats(ids, stats)
+                # Process in chunks
+                for batch_i in range(0, num_rows, chunk_size):
+                    rows_to_read = min(chunk_size, num_rows - batch_i)
+                    
+                    # Read a chunk
+                    if batch_i // file_reader.metadata.row_group.row_groups[0].num_rows < file_reader.num_row_groups:
+                        batch = file_reader.read_row_group(
+                            batch_i // file_reader.metadata.row_group.row_groups[0].num_rows
+                        ).to_pandas()
+                    else:
+                        batch = next(file_reader.iter_batches(batch_size=rows_to_read)).to_pandas()
+                    
+                    # Compute statistics
+                    for token_ids_list in tqdm(batch['token_ids'], 
+                                             desc=f"Processing chunk {batch_i//chunk_size + 1}/{(num_rows-1)//chunk_size + 1}"):
+                        for ids in token_ids_list:
+                            if len(ids) >= 2:
+                                get_stats(ids, stats)
             
             # If no pairs found, we're done
             if not stats:
@@ -159,16 +206,35 @@ class RegexTokenizer(Tokenizer):
                 if verbose:
                     print(f"Applying merge to file {i+1}/{len(processed_files)}")
                 
-                # Load processed data
-                df = pd.read_parquet(processed_file)
-                # Apply the latest merge
-                def apply_merge_to_list(token_ids_list):
-                    return [merge(ids, best_pair, new_idx) for ids in token_ids_list]
+                # Read processed data with PyArrow
+                file_reader = pq.ParquetFile(processed_file)
+                num_rows = file_reader.metadata.num_rows
                 
-                df['token_ids'] = df['token_ids'].apply(apply_merge_to_list)
+                all_updated_token_ids = []
                 
-                # Save updated data
-                df[['token_ids']].to_parquet(processed_file)
+                # Process in chunks
+                for batch_i in range(0, num_rows, chunk_size):
+                    rows_to_read = min(chunk_size, num_rows - batch_i)
+                    
+                    # Read a chunk
+                    if batch_i // file_reader.metadata.row_group.row_groups[0].num_rows < file_reader.num_row_groups:
+                        batch = file_reader.read_row_group(
+                            batch_i // file_reader.metadata.row_group.row_groups[0].num_rows
+                        ).to_pandas()
+                    else:
+                        batch = next(file_reader.iter_batches(batch_size=rows_to_read)).to_pandas()
+                    
+                    # Apply the latest merge
+                    for token_ids_list in tqdm(batch['token_ids'], 
+                                             desc=f"Processing chunk {batch_i//chunk_size + 1}/{(num_rows-1)//chunk_size + 1}"):
+                        # Apply only the latest merge
+                        updated_token_ids = [merge(ids, best_pair, new_idx) for ids in token_ids_list]
+                        all_updated_token_ids.append(updated_token_ids)
+                
+                # Save updated data with PyArrow
+                token_ids_arr = pa.array(all_updated_token_ids)
+                table = pa.table([token_ids_arr], names=['token_ids'])
+                pq.write_table(table, processed_file)
                 
                 if verbose:
                     print(f"Saved updated data to {processed_file}")
@@ -181,9 +247,43 @@ class RegexTokenizer(Tokenizer):
         if temp_dir != None and verbose:
             print(f"Temporary files are stored in {temp_dir}")
             print("You may want to delete them manually after verifying the results.")
-            
-    def train_from_parquet_dir(self, data_dir, text_column, vocab_size, temp_dir=None, verbose=False, pattern="*.parquet"): 
+
+    def train_from_parquet_dir(self, data_dir, text_column, vocab_size, temp_dir=None, verbose=False, pattern="*.parquet", chunk_size=10000):
+        """
+        Train the tokenizer using parquet files found in a directory. This method implements
+        a memory-efficient approach by:
+        1. Finding all parquet files in the specified directory
+        2. Processing each parquet file (applying regex, converting to bytes)
+        3. Computing statistics across all files 
+        4. Finding the most frequent pair and applying the merge
+        5. Repeating the process for each merge iteration
         
+        Args:
+            data_dir: Directory containing parquet files
+            text_column: Name of the column containing text data in the parquet files
+            vocab_size: The final vocabulary size (including the 256 base tokens)
+            temp_dir: Directory to store temporary processed files (default: uses system temp dir)
+            verbose: Whether to print progress information
+            pattern: Glob pattern to match parquet files (default: "*.parquet")
+            chunk_size: Number of rows to process at once (for memory efficiency)
+            
+        Example:
+            ```python
+            from minbpe.regex import RegexTokenizer
+            
+            # Create tokenizer and train
+            tokenizer = RegexTokenizer()
+            tokenizer.train_from_parquet_dir(
+                data_dir='data/corpus/',
+                text_column='text',
+                vocab_size=5000,
+                verbose=True
+            )
+            
+            # Save the trained tokenizer
+            tokenizer.save('my_tokenizer')
+            ```
+        """
         # Find all parquet files in the directory
         parquet_path = os.path.join(data_dir, pattern)
         parquet_files = glob.glob(parquet_path)
@@ -202,7 +302,8 @@ class RegexTokenizer(Tokenizer):
             text_column=text_column,
             vocab_size=vocab_size,
             temp_dir=temp_dir,
-            verbose=verbose
+            verbose=verbose,
+            chunk_size=chunk_size
         )
 
     def register_special_tokens(self, special_tokens):
