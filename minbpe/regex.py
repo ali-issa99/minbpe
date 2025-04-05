@@ -12,13 +12,16 @@ Unlike BasicTokenizer:
 from .base import Tokenizer, get_stats, merge
 from tqdm import tqdm
 import regex as re
-
+import pandas as pd
+import numpy as np
+import os
+import tempfile
 
 # the main GPT text split patterns, see
 # https://github.com/openai/tiktoken/blob/main/tiktoken_ext/openai_public.py
 GPT2_SPLIT_PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 GPT4_SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
-
+import glob
 
 class RegexTokenizer(Tokenizer):
 
@@ -69,150 +72,138 @@ class RegexTokenizer(Tokenizer):
         # save class variables
         self.merges = merges # used in encode()
         self.vocab = vocab   # used in decode()
-
-    # def train_from_iterator(self, text_iterator, vocab_size, batch_size=100000, verbose=False):
-        # """
-        # Memory-efficient training method that processes text in batches.
-        # # Instead of loading all text into memory, it processes one batch at a time.
-        
-        # # Args:
-        # #     text_iterator: An iterator that yields batches of text strings
-        # #     vocab_size: The final vocabulary size (including the 256 base tokens)
-        # #     batch_size: Number of examples to process in each batch (unused, provided for API compatibility)
-        # #     verbose: Whether to print progress information
-        # # """
-        # assert vocab_size >= 256
-        # num_merges = vocab_size - 256
-        
-        # # Initialize merges and vocab
-        # merges = {}  # (int, int) -> int
-        # vocab = {idx: bytes([idx]) for idx in range(256)}
-        
-        # # Perform the merges
-        # for i in range(num_merges):
-        #     if verbose:
-        #         print(f"Merge {i+1}/{num_merges}: Calculating statistics...")
-            
-        #     # Reset stats for each iteration
-        #     stats = {}
-        #     # Create a copy of text_iterator for counting
-        #     # Process each batch
-        #     for batch_texts in tqdm(text_iterator, desc=f"Merge {i+1}/{num_merges}: Processing batches"):
-        #         # Process each text in the batch
-        #         for text in tqdm(batch_texts):
-        #             # Split text into chunks using the tokenizer's pattern
-        #             text_chunks = self.compiled_pattern.findall(text)
-        #             # Process each chunk of text
-        #             for chunk in text_chunks:
-        #                 # Convert to bytes
-        #                 ids = list(chunk.encode("utf-8"))
-        #                 # Apply all previous merges in order
-        #                 # for pair, merge_idx in sorted(merges.items(), key=lambda x: x[1]):
-        #                 #     ids = merge(ids, pair, merge_idx)
-                        
-        #                 # Update statistics if the chunk has at least 2 tokens (needed for pairs)
-        #                 if len(ids) >= 2:
-        #                     get_stats(ids, stats)
-            
-        #     # If no stats collected, we're done
-        #     if not stats:
-        #         if verbose:
-        #             print(f"No more pairs found after {i} merges. Stopping early.")
-        #         break
-            
-        #     # Find the pair with the highest count
-        #     pair = max(stats, key=stats.get)
-            
-        #     # Mint a new token: assign it the next available id
-        #     idx = 256 + i
-            
-        #     # Save the merge
-        #     merges[pair] = idx
-        #     vocab[idx] = vocab[pair[0]] + vocab[pair[1]]
-            
-        #     # Print progress
-        #     if verbose:
-        #         print(f"Merge {i+1}/{num_merges}: {pair} -> {idx} ({vocab[idx]}) had {stats[pair]} occurrences")
-        
-        # Save class variables
-        # self.merges = merges  # used in encode()
-        # self.vocab = vocab    # used in decode()
-
-    def train_from_iterator(self, text_iterator, vocab_size, verbose=False):
-        """
-        Alternative training method that concatenates all text from the iterator in RAM.
-        This method loads all text into memory at once, which requires more RAM but may be faster.
-        
-        Args:
-            text_iterator: An iterator that yields batches of text strings
-            vocab_size: The final vocabulary size (including the 256 base tokens)
-            verbose: Whether to print progress information
-        """
+    
+    def train_from_parquet(self, parquet_files, text_column, vocab_size, temp_dir=None, verbose=False):
         assert vocab_size >= 256
         num_merges = vocab_size - 256
         
-        if verbose:
-            print("Concatenating all text from iterator...")
-        
-        # Collect all text chunks into a single list
-        all_text_chunks = []
-        for batch_texts in tqdm(text_iterator, desc="Collecting text batches"):
-            for text in batch_texts:
-                # Split text into chunks using the tokenizer's pattern
-                text_chunks = self.compiled_pattern.findall(text)
-                all_text_chunks.extend(text_chunks)
-        
-        if verbose:
-            print(f"Collected {len(all_text_chunks)} text chunks")
-            
-        # Convert all chunks to byte IDs
-        if verbose:
-            print("Converting text chunks to byte IDs...")
-        ids = [list(ch.encode("utf-8")) for ch in all_text_chunks]
+        # Create temporary directory if not provided
+        if temp_dir is None:
+            temp_dir = tempfile.mkdtemp(prefix="minbpe_")
+        os.makedirs(temp_dir, exist_ok=True)
         
         # Initialize merges and vocab
         merges = {}  # (int, int) -> int
+        merge_list = []  # Store merges in order for efficient application
         vocab = {idx: bytes([idx]) for idx in range(256)}
         
-        # Perform the merges
-        for i in range(num_merges):
+        # Initialize parquet files for processed data
+        processed_files = []
+        for i, parquet_file in enumerate(parquet_files):
+            processed_file = os.path.join(temp_dir, f"processed_{i}.parquet")
+            processed_files.append(processed_file)
+            
             if verbose:
-                print(f"Merge {i+1}/{num_merges}: Calculating statistics...")
+                print(f"Initial processing of {parquet_file}")
+                
+            # Load the parquet file
+            df = pd.read_parquet(parquet_file)
             
-            # Calculate statistics across all IDs
+            # Apply regex pattern and convert to bytes
+            def process_text(text):
+                if not isinstance(text, str):
+                    return []
+                chunks = self.compiled_pattern.findall(text)
+                return [list(ch.encode("utf-8")) for ch in chunks]
+            
+            # Process text column
+            df['token_ids'] = df[text_column].apply(process_text)
+            
+            # Save processed data
+            df[['token_ids']].to_parquet(processed_file)
+            
+            if verbose:
+                print(f"Saved processed data to {processed_file}")
+        
+        # Perform merges
+        for merge_idx in range(num_merges):
+            if verbose:
+                print(f"\nStarting merge {merge_idx+1}/{num_merges}")
+            
+            # Compute statistics across all processed files
             stats = {}
-            for chunk_ids in tqdm(ids, desc=f"Processing chunks for merge {i+1}/{num_merges}"):
-                if len(chunk_ids) >= 2:
-                    get_stats(chunk_ids, stats)
+            for i, processed_file in enumerate(processed_files):
+                if verbose:
+                    print(f"Computing statistics for file {i+1}/{len(processed_files)}")
+                
+                # Load processed data
+                df = pd.read_parquet(processed_file)
+                
+                # Compute statistics
+                for token_ids_list in tqdm(df['token_ids'], desc=f"Computing stats for file {i+1}"):
+                    for ids in token_ids_list:
+                            get_stats(ids, stats)
             
-            # If no stats collected, we're done
+            # If no pairs found, we're done
             if not stats:
                 if verbose:
-                    print(f"No more pairs found after {i} merges. Stopping early.")
+                    print(f"No more pairs found after {merge_idx} merges. Stopping early.")
                 break
             
-            # Find the pair with the highest count
-            pair = max(stats, key=stats.get)
+            # Find the best pair to merge
+            best_pair = max(stats, key=stats.get)
             
-            # Mint a new token: assign it the next available id
-            idx = 256 + i
+            # Mint a new token ID
+            new_idx = 256 + merge_idx
             
-            # Apply the merge to all chunks
+            # Save this merge
+            merges[best_pair] = new_idx
+            merge_list.append((best_pair, new_idx))
+            vocab[new_idx] = vocab[best_pair[0]] + vocab[best_pair[1]]
+            
             if verbose:
-                print(f"Applying merge {i+1}/{num_merges} to all chunks...")
-            ids = [merge(chunk_ids, pair, idx) for chunk_ids in tqdm(ids)]
+                print(f"Merge {merge_idx+1}: {best_pair} -> {new_idx} ({vocab[new_idx]}) with {stats[best_pair]} occurrences")
             
-            # Save the merge
-            merges[pair] = idx
-            vocab[idx] = vocab[pair[0]] + vocab[pair[1]]
-            
-            # Print progress
-            if verbose:
-                print(f"Merge {i+1}/{num_merges}: {pair} -> {idx} ({vocab[idx]}) had {stats[pair]} occurrences")
+            # Apply the merge to all files
+            for i, processed_file in enumerate(processed_files):
+                if verbose:
+                    print(f"Applying merge to file {i+1}/{len(processed_files)}")
+                
+                # Load processed data
+                df = pd.read_parquet(processed_file)
+                # Apply the latest merge
+                def apply_merge_to_list(token_ids_list):
+                    return [merge(ids, best_pair, new_idx) for ids in token_ids_list]
+                
+                df['token_ids'] = df['token_ids'].apply(apply_merge_to_list)
+                
+                # Save updated data
+                df[['token_ids']].to_parquet(processed_file)
+                
+                if verbose:
+                    print(f"Saved updated data to {processed_file}")
         
-        # Save class variables
-        self.merges = merges  # used in encode()
-        self.vocab = vocab    # used in decode()
+        # Save final results to the tokenizer
+        self.merges = merges
+        self.vocab = vocab
+        
+        # Clean up temporary files if needed
+        if temp_dir != None and verbose:
+            print(f"Temporary files are stored in {temp_dir}")
+            print("You may want to delete them manually after verifying the results.")
+            
+    def train_from_parquet_dir(self, data_dir, text_column, vocab_size, temp_dir=None, verbose=False, pattern="*.parquet"): 
+        
+        # Find all parquet files in the directory
+        parquet_path = os.path.join(data_dir, pattern)
+        parquet_files = glob.glob(parquet_path)
+        
+        if not parquet_files:
+            raise ValueError(f"No parquet files found in {data_dir} matching pattern {pattern}")
+        
+        if verbose:
+            print(f"Found {len(parquet_files)} parquet files in {data_dir}")
+            for file in parquet_files:
+                print(f"  - {file}")
+                
+        # Train using the found parquet files
+        self.train_from_parquet(
+            parquet_files=parquet_files,
+            text_column=text_column,
+            vocab_size=vocab_size,
+            temp_dir=temp_dir,
+            verbose=verbose
+        )
 
     def register_special_tokens(self, special_tokens):
         # special_tokens is a dictionary of str -> int
