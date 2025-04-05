@@ -1,5 +1,7 @@
 regex>=2022.1.18
+# Required for parquet handling
+pyarrow>=11.0.0
+# For progress bars (optional, can be removed if not needed)
+tqdm>=4.65.0
+# For Hugging Face dataset processing
 datasets>=2.14.0
-# Optional dependencies for Huggingface conversion
-tokenizers>=0.13.3
-transformers>=4.30.0

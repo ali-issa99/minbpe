@@ -9,10 +9,9 @@ Unlike BasicTokenizer:
 - RegexTokenizer handles optional special tokens.
 """
 
-import regex as re
 from .base import Tokenizer, get_stats, merge
-from typing import List, Iterator
-import logging
+from tqdm import tqdm
+import regex as re
 
 
 # the main GPT text split patterns, see
@@ -32,7 +31,7 @@ class RegexTokenizer(Tokenizer):
         super().__init__()
         self.pattern = GPT4_SPLIT_PATTERN if pattern is None else pattern
         self.compiled_pattern = re.compile(self.pattern)
-        self.special_tokens = {}
+        self.special_tokens =  {}
         self.inverse_special_tokens = {}
 
     def train(self, text, vocab_size, verbose=False):
@@ -71,88 +70,149 @@ class RegexTokenizer(Tokenizer):
         self.merges = merges # used in encode()
         self.vocab = vocab   # used in decode()
 
-    def train_from_iterator(self, iterator: Iterator[List[str]], vocab_size: int, verbose: bool = False, batch_processing_limit: int = None):
+    # def train_from_iterator(self, text_iterator, vocab_size, batch_size=100000, verbose=False):
+        # """
+        # Memory-efficient training method that processes text in batches.
+        # # Instead of loading all text into memory, it processes one batch at a time.
+        
+        # # Args:
+        # #     text_iterator: An iterator that yields batches of text strings
+        # #     vocab_size: The final vocabulary size (including the 256 base tokens)
+        # #     batch_size: Number of examples to process in each batch (unused, provided for API compatibility)
+        # #     verbose: Whether to print progress information
+        # # """
+        # assert vocab_size >= 256
+        # num_merges = vocab_size - 256
+        
+        # # Initialize merges and vocab
+        # merges = {}  # (int, int) -> int
+        # vocab = {idx: bytes([idx]) for idx in range(256)}
+        
+        # # Perform the merges
+        # for i in range(num_merges):
+        #     if verbose:
+        #         print(f"Merge {i+1}/{num_merges}: Calculating statistics...")
+            
+        #     # Reset stats for each iteration
+        #     stats = {}
+        #     # Create a copy of text_iterator for counting
+        #     # Process each batch
+        #     for batch_texts in tqdm(text_iterator, desc=f"Merge {i+1}/{num_merges}: Processing batches"):
+        #         # Process each text in the batch
+        #         for text in tqdm(batch_texts):
+        #             # Split text into chunks using the tokenizer's pattern
+        #             text_chunks = self.compiled_pattern.findall(text)
+        #             # Process each chunk of text
+        #             for chunk in text_chunks:
+        #                 # Convert to bytes
+        #                 ids = list(chunk.encode("utf-8"))
+        #                 # Apply all previous merges in order
+        #                 # for pair, merge_idx in sorted(merges.items(), key=lambda x: x[1]):
+        #                 #     ids = merge(ids, pair, merge_idx)
+                        
+        #                 # Update statistics if the chunk has at least 2 tokens (needed for pairs)
+        #                 if len(ids) >= 2:
+        #                     get_stats(ids, stats)
+            
+        #     # If no stats collected, we're done
+        #     if not stats:
+        #         if verbose:
+        #             print(f"No more pairs found after {i} merges. Stopping early.")
+        #         break
+            
+        #     # Find the pair with the highest count
+        #     pair = max(stats, key=stats.get)
+            
+        #     # Mint a new token: assign it the next available id
+        #     idx = 256 + i
+            
+        #     # Save the merge
+        #     merges[pair] = idx
+        #     vocab[idx] = vocab[pair[0]] + vocab[pair[1]]
+            
+        #     # Print progress
+        #     if verbose:
+        #         print(f"Merge {i+1}/{num_merges}: {pair} -> {idx} ({vocab[idx]}) had {stats[pair]} occurrences")
+        
+        # Save class variables
+        # self.merges = merges  # used in encode()
+        # self.vocab = vocab    # used in decode()
+
+    def train_from_iterator(self, text_iterator, vocab_size, verbose=False):
         """
-        Train the tokenizer on batches of text from an iterator.
+        Alternative training method that concatenates all text from the iterator in RAM.
+        This method loads all text into memory at once, which requires more RAM but may be faster.
         
         Args:
-            iterator: Iterator yielding batches of text
-            vocab_size: Target vocabulary size (must be >= 256)
+            text_iterator: An iterator that yields batches of text strings
+            vocab_size: The final vocabulary size (including the 256 base tokens)
             verbose: Whether to print progress information
-            batch_processing_limit: Optional limit on the number of batches to process
-            
-        This method allows training on datasets that are too large to fit in memory.
         """
         assert vocab_size >= 256
         num_merges = vocab_size - 256
         
-        # Initialize vocabulary with byte tokens
-        vocab = {idx: bytes([idx]) for idx in range(256)}
-        merges = {}  # (int, int) -> int
+        if verbose:
+            print("Concatenating all text from iterator...")
         
-        # Process all text into token IDs
-        all_ids = []
-        batch_count = 0
+        # Collect all text chunks into a single list
+        all_text_chunks = []
+        for batch_texts in tqdm(text_iterator, desc="Collecting text batches"):
+            for text in batch_texts:
+                # Split text into chunks using the tokenizer's pattern
+                text_chunks = self.compiled_pattern.findall(text)
+                all_text_chunks.extend(text_chunks)
         
         if verbose:
-            print("Processing batches for training...")
+            print(f"Collected {len(all_text_chunks)} text chunks")
             
-        for batch in iterator:
-            batch_count += 1
-            if batch_processing_limit and batch_count > batch_processing_limit:
-                if verbose:
-                    print(f"Reached batch processing limit of {batch_processing_limit}")
-                break
-                
-            if verbose and batch_count % 10 == 0:
-                print(f"Processing batch {batch_count}")
-                
-            # Process each text in the batch
-            for text in batch:
-                # Split the text using the regex pattern
-                text_chunks = re.findall(self.compiled_pattern, text)
-                # Convert each chunk to bytes then to IDs
-                chunk_ids = [list(ch.encode("utf-8")) for ch in text_chunks]
-                all_ids.extend(chunk_ids)
-        
+        # Convert all chunks to byte IDs
         if verbose:
-            print(f"Processed {batch_count} batches with {len(all_ids)} text chunks")
-            print(f"Beginning {num_merges} merges to reach vocab size {vocab_size}")
+            print("Converting text chunks to byte IDs...")
+        ids = [list(ch.encode("utf-8")) for ch in all_text_chunks]
         
-        # Now perform the merges
+        # Initialize merges and vocab
+        merges = {}  # (int, int) -> int
+        vocab = {idx: bytes([idx]) for idx in range(256)}
+        
+        # Perform the merges
         for i in range(num_merges):
-            # Count pair frequencies across all IDs
+            if verbose:
+                print(f"Merge {i+1}/{num_merges}: Calculating statistics...")
+            
+            # Calculate statistics across all IDs
             stats = {}
-            for chunk_ids in all_ids:
-                get_stats(chunk_ids, stats)
-                
+            for chunk_ids in tqdm(ids, desc=f"Processing chunks for merge {i+1}/{num_merges}"):
+                if len(chunk_ids) >= 2:
+                    get_stats(chunk_ids, stats)
+            
+            # If no stats collected, we're done
             if not stats:
                 if verbose:
-                    print(f"No more pairs to merge after {i} merges")
+                    print(f"No more pairs found after {i} merges. Stopping early.")
                 break
-                
-            # Find the most frequent pair
+            
+            # Find the pair with the highest count
             pair = max(stats, key=stats.get)
             
-            # Mint a new token
+            # Mint a new token: assign it the next available id
             idx = 256 + i
             
-            # Replace all occurrences of the pair with the new token
-            all_ids = [merge(chunk_ids, pair, idx) for chunk_ids in all_ids]
+            # Apply the merge to all chunks
+            if verbose:
+                print(f"Applying merge {i+1}/{num_merges} to all chunks...")
+            ids = [merge(chunk_ids, pair, idx) for chunk_ids in tqdm(ids)]
             
             # Save the merge
             merges[pair] = idx
             vocab[idx] = vocab[pair[0]] + vocab[pair[1]]
             
-            if verbose and (i+1) % 100 == 0:
-                print(f"merge {i+1}/{num_merges}: {pair} -> {idx} ({vocab[idx]}) had {stats[pair]} occurrences")
+            # Print progress
+            if verbose:
+                print(f"Merge {i+1}/{num_merges}: {pair} -> {idx} ({vocab[idx]}) had {stats[pair]} occurrences")
         
         # Save class variables
-        self.merges = merges
-        self.vocab = vocab
-        
-        if verbose:
-            print(f"Training complete. Vocabulary size: {len(vocab)}")
+        self.merges = merges  # used in encode()
+        self.vocab = vocab    # used in decode()
 
     def register_special_tokens(self, special_tokens):
         # special_tokens is a dictionary of str -> int
