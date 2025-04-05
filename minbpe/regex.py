@@ -100,7 +100,7 @@ class RegexTokenizer(Tokenizer):
         
         # Initialize parquet files for processed data
         processed_files = []
-        for i, parquet_file in enumerate(parquet_files):
+        for i, parquet_file in tqdm(enumerate(parquet_files), total=len(parquet_files), desc="Processing parquet files"):
             processed_file = os.path.join(temp_dir, f"processed_{i}.parquet")
             processed_files.append(processed_file)
             
@@ -114,26 +114,19 @@ class RegexTokenizer(Tokenizer):
             # Process in chunks to save memory
             all_token_ids = []
             
-            for batch_i in range(0, num_rows, chunk_size):
-                # Read a chunk of data
-                row_group_i = batch_i // parquet_dataset.metadata.row_group.row_groups[0].num_rows
-                rows_to_read = min(chunk_size, num_rows - batch_i)
+            # Read the file in batches using iter_batches instead of trying to access row groups directly
+            for batch in tqdm(parquet_dataset.iter_batches(batch_size=chunk_size, columns=[text_column]), 
+                            desc=f"Processing file in chunks", 
+                            total=(num_rows + chunk_size - 1) // chunk_size):
                 
-                if row_group_i < parquet_dataset.num_row_groups:
-                    batch = parquet_dataset.read_row_group(row_group_i, columns=[text_column]).to_pandas()
-                else:
-                    # Handle case where row_group_i is out of bounds
-                    batch = next(parquet_dataset.iter_batches(batch_size=rows_to_read, columns=[text_column])).to_pandas()
+                # Convert to pandas for easier processing
+                batch_df = batch.to_pandas()
                 
-                if verbose and batch_i == 0:
+                if verbose and len(all_token_ids) == 0:
                     print(f"  Processing chunks of {chunk_size} rows, total rows: {num_rows}")
                 
                 # Process text column
-                for text in tqdm(batch[text_column], desc=f"Processing chunk {batch_i//chunk_size + 1}/{(num_rows-1)//chunk_size + 1}"):
-                    if not isinstance(text, str):
-                        all_token_ids.append([])
-                        continue
-                    
+                for text in batch_df[text_column]:
                     # Split using regex pattern and convert to byte IDs
                     chunks = self.compiled_pattern.findall(text)
                     token_ids = [list(ch.encode("utf-8")) for ch in chunks]
@@ -162,21 +155,16 @@ class RegexTokenizer(Tokenizer):
                 file_reader = pq.ParquetFile(processed_file)
                 num_rows = file_reader.metadata.num_rows
                 
-                # Process in chunks
-                for batch_i in range(0, num_rows, chunk_size):
-                    rows_to_read = min(chunk_size, num_rows - batch_i)
+                # Process in chunks using iter_batches
+                for batch in tqdm(file_reader.iter_batches(batch_size=chunk_size),
+                                desc=f"Computing stats for file {i+1}",
+                                total=(num_rows + chunk_size - 1) // chunk_size):
                     
-                    # Read a chunk
-                    if batch_i // file_reader.metadata.row_group.row_groups[0].num_rows < file_reader.num_row_groups:
-                        batch = file_reader.read_row_group(
-                            batch_i // file_reader.metadata.row_group.row_groups[0].num_rows
-                        ).to_pandas()
-                    else:
-                        batch = next(file_reader.iter_batches(batch_size=rows_to_read)).to_pandas()
+                    # Convert to pandas for processing
+                    batch_df = batch.to_pandas()
                     
                     # Compute statistics
-                    for token_ids_list in tqdm(batch['token_ids'], 
-                                             desc=f"Processing chunk {batch_i//chunk_size + 1}/{(num_rows-1)//chunk_size + 1}"):
+                    for token_ids_list in batch_df['token_ids']:
                         for ids in token_ids_list:
                             if len(ids) >= 2:
                                 get_stats(ids, stats)
@@ -212,21 +200,16 @@ class RegexTokenizer(Tokenizer):
                 
                 all_updated_token_ids = []
                 
-                # Process in chunks
-                for batch_i in range(0, num_rows, chunk_size):
-                    rows_to_read = min(chunk_size, num_rows - batch_i)
+                # Process in chunks using iter_batches
+                for batch in tqdm(file_reader.iter_batches(batch_size=chunk_size),
+                                desc=f"Applying merge to file {i+1}",
+                                total=(num_rows + chunk_size - 1) // chunk_size):
                     
-                    # Read a chunk
-                    if batch_i // file_reader.metadata.row_group.row_groups[0].num_rows < file_reader.num_row_groups:
-                        batch = file_reader.read_row_group(
-                            batch_i // file_reader.metadata.row_group.row_groups[0].num_rows
-                        ).to_pandas()
-                    else:
-                        batch = next(file_reader.iter_batches(batch_size=rows_to_read)).to_pandas()
+                    # Convert to pandas for processing
+                    batch_df = batch.to_pandas()
                     
                     # Apply the latest merge
-                    for token_ids_list in tqdm(batch['token_ids'], 
-                                             desc=f"Processing chunk {batch_i//chunk_size + 1}/{(num_rows-1)//chunk_size + 1}"):
+                    for token_ids_list in batch_df['token_ids']:
                         # Apply only the latest merge
                         updated_token_ids = [merge(ids, best_pair, new_idx) for ids in token_ids_list]
                         all_updated_token_ids.append(updated_token_ids)
