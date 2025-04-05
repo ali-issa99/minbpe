@@ -25,7 +25,7 @@ print("Loading dataset...")
 
 ds= load_dataset('ali-issa/arb_diacritized_tokenized_filtered_dataset_with_arb-bpe-tokenizer-32768')
 dataset_size=len(ds['train'])
-ds = ds['train'][:int(dataset_size//2)]
+max_batch_size=int(dataset_size//2)
 # ds = load_dataset('dataset', cache_dir='./cache')
 print(f"Dataset loaded with {dataset_size} examples")
 
@@ -43,7 +43,7 @@ tokenizer = RegexTokenizer()
 
 # Train using the memory-efficient iterator-based approach
 t0 = time.time()
-tokenizer.train_from_iterator(get_training_corpus(), vocab_size)
+tokenizer.train_from_iterator(get_training_corpus(), vocab_size,max_batches=max_batch_size)
 t1 = time.time()
 
 print(f"Training took {t1 - t0:.2f} seconds")

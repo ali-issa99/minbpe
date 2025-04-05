@@ -73,7 +73,36 @@ class RegexTokenizer(Tokenizer):
         self.merges = merges # used in encode()
         self.vocab = vocab   # used in decode()
 
-    def train_from_iterator(self, text_iterator, vocab_size):
+    def train_from_iterator(self, text_iterator, vocab_size, max_batches=None):
+        """
+        Train the tokenizer using batches of text from an iterator.
+        
+        Args:
+            text_iterator: An iterator that yields batches of text strings
+            vocab_size: The final vocabulary size (including the 256 base tokens)
+            max_batches: Maximum number of batches to process (default: None, process all batches)
+            
+        Example:
+            ```python
+            from datasets import load_dataset
+            from minbpe import RegexTokenizer
+            
+            # Define a batched text iterator
+            def get_training_corpus():
+                ds = load_dataset(...)
+                for i in range(0, len(ds['train']), 10000):
+                    batch = ds['train'][i : i + 10000]['text']
+                    yield batch
+            
+            # Create tokenizer and train with all available batches
+            tokenizer = RegexTokenizer()
+            tokenizer.train_from_iterator(get_training_corpus(), vocab_size=32768)
+            
+            # Or limit to processing only the first 50 batches for faster training
+            tokenizer = RegexTokenizer()
+            tokenizer.train_from_iterator(get_training_corpus(), vocab_size=32768, max_batches=50)
+            ```
+        """
         assert vocab_size >= 256
         num_merges = vocab_size - 256
         
@@ -89,7 +118,8 @@ class RegexTokenizer(Tokenizer):
         
         # First pass: collect all token IDs from the iterator
         for batch_texts in tqdm(text_iterator, desc="Processing text batches"):
-            batch_count += 1           
+            batch_count += 1
+            
             # Process each text in the batch
             for text in batch_texts:                    
                 # Apply regex pattern to split text
@@ -98,6 +128,11 @@ class RegexTokenizer(Tokenizer):
                 # Convert chunks to byte IDs
                 ids = [list(ch.encode("utf-8")) for ch in text_chunks]
                 all_ids.append(ids)
+                
+            # Stop if we've reached the maximum number of batches
+            if max_batches is not None and batch_count >= max_batches:
+                print(f"Reached maximum number of batches ({max_batches})")
+                break
         
         print(f"Processed {batch_count} batches, found {len(all_ids)} text chunks")
         
@@ -133,7 +168,7 @@ class RegexTokenizer(Tokenizer):
         # Save class variables
         self.merges = merges  # used in encode()
         self.vocab = vocab    # used in decode()
-    
+
     def train_from_parquet(self, parquet_files, text_column, vocab_size, temp_dir=None, verbose=False, chunk_size=10000):
         """
         Train the tokenizer using parquet files as the data source with optimized performance.
