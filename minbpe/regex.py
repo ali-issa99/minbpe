@@ -16,12 +16,14 @@ import os
 import tempfile
 import pyarrow.parquet as pq
 import pyarrow as pa
+import glob
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 # the main GPT text split patterns, see
 # https://github.com/openai/tiktoken/blob/main/tiktoken_ext/openai_public.py
 GPT2_SPLIT_PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 GPT4_SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
-import glob
 
 class RegexTokenizer(Tokenizer):
 
@@ -73,7 +75,7 @@ class RegexTokenizer(Tokenizer):
         self.merges = merges # used in encode()
         self.vocab = vocab   # used in decode()
 
-    def train_from_iterator(self, text_iterator, vocab_size, max_batches=None):
+    def train_from_iterator(self, text_iterator, vocab_size, max_batches=None, max_workers=None):
         """
         Train the tokenizer using batches of text from an iterator.
         
@@ -81,6 +83,7 @@ class RegexTokenizer(Tokenizer):
             text_iterator: An iterator that yields batches of text strings
             vocab_size: The final vocabulary size (including the 256 base tokens)
             max_batches: Maximum number of batches to process (default: None, process all batches)
+            max_workers: Maximum number of threads to use for parallel processing (default: None)
             
         Example:
             ```python
@@ -116,23 +119,44 @@ class RegexTokenizer(Tokenizer):
         
         print("Processing text batches...")
         
+        # Define a function to process a single text and return its IDs
+        def process_text(text):
+            text_chunks = self.compiled_pattern.findall(text)
+            return [list(ch.encode("utf-8")) for ch in text_chunks]
+        
+        # Define a function to process an entire batch
+        def process_batch(batch_texts):
+            batch_ids = []
+            for text in batch_texts:
+                batch_ids.extend(process_text(text))
+            return batch_ids
+        
         # First pass: collect all token IDs from the iterator
-        for batch_texts in tqdm(text_iterator, desc="Processing text batches"):
-            batch_count += 1
-            
-            # Process each text in the batch
-            for text in batch_texts:                    
-                # Apply regex pattern to split text
-                text_chunks = self.compiled_pattern.findall(text)
- 
-                # Convert chunks to byte IDs
-                ids = [list(ch.encode("utf-8")) for ch in text_chunks]
-                all_ids.extend(ids)
+        # Use parallel processing if max_workers is specified
+        if max_workers is not None and max_workers > 1:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for batch_texts in tqdm(text_iterator, desc="Processing text batches"):
+                    batch_count += 1
+                    
+                    # Process the batch in parallel
+                    all_ids.extend(process_batch(batch_texts))
+                    
+                    # Stop if we've reached the maximum number of batches
+                    if max_batches is not None and batch_count >= max_batches:
+                        print(f"Reached maximum number of batches ({max_batches})")
+                        break
+        else:
+            # Sequential processing
+            for batch_texts in tqdm(text_iterator, desc="Processing text batches"):
+                batch_count += 1
                 
-            # Stop if we've reached the maximum number of batches
-            if max_batches is not None and batch_count >= max_batches:
-                print(f"Reached maximum number of batches ({max_batches})")
-                break
+                # Process each text in the batch
+                all_ids.extend(process_batch(batch_texts))
+                
+                # Stop if we've reached the maximum number of batches
+                if max_batches is not None and batch_count >= max_batches:
+                    print(f"Reached maximum number of batches ({max_batches})")
+                    break
         
         print(f"Processed {batch_count} batches, found {len(all_ids)} text chunks")
         
@@ -142,9 +166,35 @@ class RegexTokenizer(Tokenizer):
             
             # Count the number of times every consecutive pair appears
             stats = {}                
-            for ids in tqdm(all_ids, desc="Computing statistics"):  
-                # Update statistics in-place
-                get_stats(ids, stats)
+            
+            # Define a function to update stats for a subset of all_ids
+            def update_stats_for_subset(subset_ids):
+                subset_stats = {}
+                for ids in subset_ids:
+                    get_stats(ids, subset_stats)
+                return subset_stats
+            
+            # Use parallel processing for statistics computation if max_workers is specified
+            if max_workers is not None and max_workers > 1:
+                # Split all_ids into chunks for parallel processing
+                chunk_size = max(1, len(all_ids) // max_workers)
+                id_chunks = [all_ids[j:j+chunk_size] for j in range(0, len(all_ids), chunk_size)]
+                
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    chunk_stats_list = list(tqdm(
+                        executor.map(update_stats_for_subset, id_chunks),
+                        total=len(id_chunks),
+                        desc="Computing statistics"
+                    ))
+                    
+                    # Merge all stats dictionaries
+                    for chunk_stats in chunk_stats_list:
+                        for pair, count in chunk_stats.items():
+                            stats[pair] = stats.get(pair, 0) + count
+            else:
+                # Sequential processing
+                for ids in tqdm(all_ids, desc="Computing statistics"):
+                    get_stats(ids, stats)
             
             # If no pairs found, we're done
             if not stats:
@@ -155,8 +205,32 @@ class RegexTokenizer(Tokenizer):
             pair = max(stats, key=stats.get)
             # Mint a new token: assign it the next available id
             idx = 256 + i
-            # Replace all occurrences of pair in ids with idx
-            all_ids = [merge(ids, pair, idx) for ids in all_ids]
+            
+            # Define a function to apply merge to a subset of all_ids
+            def apply_merge_to_subset(subset_ids, merge_pair, merge_idx):
+                return [merge(ids, merge_pair, merge_idx) for ids in subset_ids]
+            
+            # Use parallel processing for merge application if max_workers is specified
+            if max_workers is not None and max_workers > 1:
+                # Split all_ids into chunks for parallel processing
+                chunk_size = max(1, len(all_ids) // max_workers)
+                id_chunks = [all_ids[j:j+chunk_size] for j in range(0, len(all_ids), chunk_size)]
+                
+                # Create a partial function with the pair and idx already set
+                apply_merge_partial = partial(apply_merge_to_subset, merge_pair=pair, merge_idx=idx)
+                
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    merged_chunks = list(tqdm(
+                        executor.map(apply_merge_partial, id_chunks),
+                        total=len(id_chunks),
+                        desc="Applying merge"
+                    ))
+                    
+                    # Concatenate all merged chunks
+                    all_ids = [ids for chunk in merged_chunks for ids in chunk]
+            else:
+                # Sequential processing
+                all_ids = [merge(ids, pair, idx) for ids in all_ids]
             
             # Save the merge
             merges[pair] = idx
