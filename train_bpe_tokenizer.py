@@ -13,7 +13,7 @@ from minbpe import RegexTokenizer
 os.makedirs("models", exist_ok=True)
 # Load the dataset
 print("Loading dataset...")
-ds= load_dataset('ali-issa/arb_diacritized_tokenized_filtered_dataset_with_arb-bpe-tokenizer-32768',dat_dir='test')
+ds= load_dataset('ali-issa/arb_diacritized_tokenized_filtered_dataset_with_arb-bpe-tokenizer-32768',data_dir='test')
 split='test'
 # ds= load_dataset('parquet',data_files='dataset/test/*.parquet')
 dataset_size=len(ds[split])
