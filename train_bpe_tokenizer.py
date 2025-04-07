@@ -13,7 +13,7 @@ from minbpe import RegexTokenizer
 os.makedirs("models", exist_ok=True)
 # Load the dataset
 print("Loading dataset...")
-ds= load_dataset('ali-issa/arb_diacritized_tokenized_filtered_dataset_with_arb-bpe-tokenizer-32768',split='test')
+ds= load_dataset('ali-issa/arb_diacritized_tokenized_filtered_dataset_with_arb-bpe-tokenizer-32768',dat_dir='test')
 split='test'
 # ds= load_dataset('parquet',data_files='dataset/test/*.parquet')
 dataset_size=len(ds[split])
@@ -21,8 +21,8 @@ max_batch_size=dataset_size
 
 def get_training_corpus():
     """Iterator that yields batches of text from the dataset"""
-    for i in range(0, len(ds['train']), 10000):
-        batch = ds['train'][i : i + 10000][text_column]
+    for i in range(0, len(ds[split]), 10000):
+        batch = ds[split][i : i + 10000][text_column]
         if batch:  # Yield only if batch is not empty
             yield batch
 
