@@ -13,11 +13,11 @@ from minbpe import RegexTokenizer
 os.makedirs("models", exist_ok=True)
 # Load the dataset
 print("Loading dataset...")
-ds= load_dataset('ali-issa/arb_diacritized_tokenized_filtered_dataset_with_arb-bpe-tokenizer-32768',data_dir='test')
-split='test'
-# ds= load_dataset('parquet',data_files='dataset/test/*.parquet')
+# ds= load_dataset('ali-issa/arb_diacritized_tokenized_filtered_dataset_with_arb-bpe-tokenizer-32768',data_dir='test')
+split='train'
+ds= load_dataset('parquet',data_files='dataset/test/*.parquet')
 dataset_size=len(ds[split])
-max_batches=5000
+max_batches=10000
 batch_size=10000
 
 def get_training_corpus():

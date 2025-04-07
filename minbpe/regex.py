@@ -98,7 +98,7 @@ class RegexTokenizer(Tokenizer):
  
                 # Convert chunks to byte IDs
                 ids = [list(ch.encode("utf-8")) for ch in text_chunks]
-                all_ids.append(ids)
+                all_ids.extend(ids)
                 
             # Stop if we've reached the maximum number of batches
             if max_batches is not None and batch_count >= max_batches:
