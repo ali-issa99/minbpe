@@ -73,7 +73,7 @@ class RegexTokenizer(Tokenizer):
         self.merges = merges # used in encode()
         self.vocab = vocab   # used in decode()
 
-    def train_from_iterator(self, text_iterator, vocab_size, max_batches=None):
+    def train_from_iterator(self, text_iterator, vocab_size,batch_size, max_batches):
         assert vocab_size >= 256
         num_merges = vocab_size - 256
         
@@ -89,7 +89,7 @@ class RegexTokenizer(Tokenizer):
         
         # First pass: collect all token IDs from the iterator
         for batch_texts in tqdm(text_iterator, desc="Processing text batches"):
-            batch_count += 1
+            batch_count += batch_size
             
             # Process each text in the batch
             for text in batch_texts:                    

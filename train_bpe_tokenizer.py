@@ -17,12 +17,13 @@ ds= load_dataset('ali-issa/arb_diacritized_tokenized_filtered_dataset_with_arb-b
 split='test'
 # ds= load_dataset('parquet',data_files='dataset/test/*.parquet')
 dataset_size=len(ds[split])
-max_batch_size=dataset_size
+max_batches=5000
+batch_size=10000
 
 def get_training_corpus():
     """Iterator that yields batches of text from the dataset"""
-    for i in range(0, len(ds[split]), 10000):
-        batch = ds[split][i : i + 10000][text_column]
+    for i in range(0, len(ds[split]), batch_size):
+        batch = ds[split][i : i + batch_size][text_column]
         if batch:  # Yield only if batch is not empty
             yield batch
 
@@ -43,7 +44,7 @@ tokenizer = RegexTokenizer()
 
 # Train using the memory-efficient iterator-based approach
 t0 = time.time()
-tokenizer.train_from_iterator(get_training_corpus(), vocab_size,max_batches=max_batch_size)
+tokenizer.train_from_iterator(get_training_corpus(), vocab_size,batch_size, max_batches)
 t1 = time.time()
 
 print(f"Training took {t1 - t0:.2f} seconds")
