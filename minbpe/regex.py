@@ -9,7 +9,7 @@ Unlike BasicTokenizer:
 - RegexTokenizer handles optional special tokens.
 """
 
-from .base import Tokenizer, get_stats, merge
+from .base import Tokenizer, get_stats, get_stats_batch, merge
 from tqdm import tqdm
 import regex as re
 import os
@@ -32,7 +32,7 @@ class RegexTokenizer(Tokenizer):
           example: {'<|endoftext|>': 100257}
         """
         super().__init__()
-        self.pattern = GPT4_SPLIT_PATTERN if pattern is None else pattern
+        self.pattern = GPT2_SPLIT_PATTERN if pattern is None else pattern
         self.compiled_pattern = re.compile(self.pattern)
         self.special_tokens =  {}
         self.inverse_special_tokens = {}
@@ -50,6 +50,7 @@ class RegexTokenizer(Tokenizer):
         # iteratively merge the most common pairs to create new tokens
         merges = {} # (int, int) -> int
         vocab = {idx: bytes([idx]) for idx in range(256)} # idx -> bytes
+        # vocab = {}
         for i in range(num_merges):
             # count the number of times every consecutive pair appears
             stats = {}
@@ -73,49 +74,130 @@ class RegexTokenizer(Tokenizer):
         self.merges = merges # used in encode()
         self.vocab = vocab   # used in decode()
 
-    def train_from_iterator(self, text_iterator, vocab_size,batch_size, max_batches):
-        assert vocab_size >= 256
-        num_merges = vocab_size - 256
-        
+    def train_character_level_bpe_from_iterator(self, text_iterator, vocab_size, batch_size, max_batches):
+        assert vocab_size >= 1
+        num_merges = vocab_size
         # Initialize merges and vocab
         merges = {}  # (int, int) -> int
-        vocab = {idx: bytes([idx]) for idx in range(256)}  # idx -> bytes
-        
-        # Process all batches and collect token IDs
-        all_ids = []
+        # Process text batches
+        all_batches = []
         batch_count = 0
+        unique_chars = set()
         
-        print("Processing text batches...")
-        
-        # First pass: collect all token IDs from the iterator
+        print("Collecting text batches...")
+        # Collect all batches and unique characters in one pass
         for batch_texts in tqdm(text_iterator, desc="Processing text batches"):
+            all_batches.append(batch_texts)
             batch_count += batch_size
             
-            # Process each text in the batch
-            for text in batch_texts:                    
-                # Apply regex pattern to split text
-                text_chunks = self.compiled_pattern.findall(text)
- 
-                # Convert chunks to byte IDs
-                ids = [list(ch.encode("utf-8")) for ch in text_chunks]
-                all_ids.extend(ids)
+            # Process each text in the batch to collect unique characters
+            for text in batch_texts:
+                unique_chars.update(text)
                 
             # Stop if we've reached the maximum number of batches
             if max_batches is not None and batch_count >= max_batches:
                 print(f"Reached maximum number of batches ({max_batches})")
                 break
         
+        # Sort unique characters for consistent ordering
+        unique_chars = sorted(unique_chars)
+
+        # Initialize vocab with unique characters
+        vocab = {}
+        char_to_id ={}
+        for i, char in enumerate(unique_chars):
+            vocab[i] = char
+            char_to_id[char] = i
+
+        # Convert all text to character IDs
+        all_ids = []
+        print("Converting to character IDs...")
+        for batch_texts in tqdm(all_batches, desc="Converting to character IDs"):
+            # Process each text in the batch
+            for text in batch_texts:
+                # Apply regex pattern to split text
+                text_chunks = self.compiled_pattern.findall(text)
+                # input text preprocessing
+                ids= [[char_to_id[ch] for ch in chunk ] for chunk in text_chunks]
+                
+                all_ids.extend(ids)
+                        
         print(f"Processed {batch_count} batches, found {len(all_ids)} text chunks")
         
         # Iteratively find and apply merges
         for i in range(num_merges):
             print(f"\nStarting merge {i+1}/{num_merges}")
-            
             # Count the number of times every consecutive pair appears
             stats = {}                
-            for ids in tqdm(all_ids, desc="Computing statistics"):  
+            for chunk_ids in tqdm(all_ids, desc="Computing statistics"):  
                 # Update statistics in-place
-                get_stats(ids, stats)
+                get_stats(chunk_ids, stats)
+            
+            # If no pairs found, we're done
+            if not stats:
+                print(f"No more pairs found after {i} merges. Stopping early.")
+                break
+            
+            # Find the pair with the highest count
+            pair = max(stats, key=stats.get)
+            # Mint a new token: assign it the next available id
+            idx = len(vocab)
+            # Replace all occurrences of pair in ids with idx
+            all_ids = [merge(chunk_ids, pair, idx) for chunk_ids in all_ids]
+            # save the merge
+            merges[pair] = idx
+            vocab[idx] = vocab[pair[0]] + vocab[pair[1]]
+            
+            # Print progress
+            print(f"Merge {i+1}/{num_merges}: {pair} -> {idx} {vocab[idx]} had {stats[pair]} occurrences")
+        
+        # Save class variables
+        self.merges = merges  # used in encode()
+        self.vocab = vocab    # used in decode()
+
+    def train_from_iterator(self, text_iterator, vocab_size, batch_size, max_batches):
+        assert vocab_size >= 1
+        num_merges = vocab_size
+        # Initialize merges and vocab
+        merges = {}  # (int, int) -> int
+        # Process text batches
+        batch_count = 0
+        
+        print("Collecting text batches...")
+        # Sort unique characters for consistent ordering
+
+        # Initialize vocab with unique characters
+        vocab = {idx: bytes([idx]) for idx in range(256)}
+        # Convert all text to character IDs
+        all_ids = []
+        print("Converting to character IDs...")
+        for batch_texts in tqdm(text_iterator, desc="Converting to character IDs"):
+            # Process each text in the batch
+            for text in batch_texts:
+                # Apply regex pattern to split text
+                text_chunks = self.compiled_pattern.findall(text)
+
+                # input text preprocessing
+                ids = [list(ch.encode("utf-8")) for ch in text_chunks]
+                
+                all_ids.extend(ids)
+
+            # Stop if we've reached the maximum number of batches
+            batch_count += batch_size
+            if max_batches is not None and batch_count >= max_batches:
+                print(f"Reached maximum number of batches ({max_batches})")
+                break
+                        
+        print(f"Processed {batch_count} batches, found {len(all_ids)} text chunks")
+        
+        # Iteratively find and apply merges
+        for i in range(num_merges):
+            print(f"\nStarting merge {i+1}/{num_merges}")
+            # Count the number of times every consecutive pair appears
+            stats = {}                
+            for chunk_ids in tqdm(all_ids, desc="Computing statistics"):  
+                # Update statistics in-place
+                get_stats(chunk_ids, stats)
             
             # If no pairs found, we're done
             if not stats:
@@ -127,19 +209,18 @@ class RegexTokenizer(Tokenizer):
             # Mint a new token: assign it the next available id
             idx = 256 + i
             # Replace all occurrences of pair in ids with idx
-            all_ids = [merge(ids, pair, idx) for ids in all_ids]
-            
-            # Save the merge
+            all_ids = [merge(chunk_ids, pair, idx) for chunk_ids in all_ids]
+            # save the merge
             merges[pair] = idx
+            
             vocab[idx] = vocab[pair[0]] + vocab[pair[1]]
             
             # Print progress
-            print(f"Merge {i+1}/{num_merges}: {pair} -> {idx} ({vocab[idx]}) had {stats[pair]} occurrences")
+            print(f"Merge {i+1}/{num_merges}: {pair} -> {idx} {vocab[idx]} had {stats[pair]} occurrences")
         
         # Save class variables
         self.merges = merges  # used in encode()
         self.vocab = vocab    # used in decode()
-
 
     def register_special_tokens(self, special_tokens):
         # special_tokens is a dictionary of str -> int
