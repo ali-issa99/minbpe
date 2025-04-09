@@ -21,17 +21,6 @@ def get_stats(ids, counts=None):
         counts[pair] = counts.get(pair, 0) + 1
     return counts
 
-def get_stats_batch(sequences, counts=None):
-    """
-    Given a list of lists of integers, return a dictionary of counts of consecutive pairs across all sequences.
-    Example: [[1, 2, 3], [1, 2, 4]] -> {(1, 2): 2, (2, 3): 1, (2, 4): 1}
-    Optionally allows to update an existing dictionary of counts
-    """
-    counts = {} if counts is None else counts
-    for sequence in sequences:
-        for pair in zip(sequence, sequence[1:]): # iterate consecutive elements
-            counts[pair] = counts.get(pair, 0) + 1
-    return counts
 
 def merge(ids, pair, idx):
     """
@@ -130,57 +119,22 @@ class Tokenizer:
         inverted_merges = {idx: pair for pair, idx in self.merges.items()}
         with open(vocab_file, "w", encoding="utf-8") as f:
             for idx, token in self.vocab.items():
-                # For integer tokens, we can directly write the token value
-                s = str(token)
+                # note: many tokens may be partial utf-8 sequences
+                # and cannot be decoded into valid strings. Here we're using
+                # errors='replace' to replace them with the replacement char �.
+                # this also means that we couldn't possibly use .vocab in load()
+                # because decoding in this way is a lossy operation!
+                s = render_token(token)
                 # find the children of this token, if any
                 if idx in inverted_merges:
                     # if this token has children, render it nicely as a merge
                     idx0, idx1 = inverted_merges[idx]
-                    s0 = str(self.vocab[idx0])
-                    s1 = str(self.vocab[idx1])
+                    s0 = render_token(self.vocab[idx0])
+                    s1 = render_token(self.vocab[idx1])
                     f.write(f"[{s0}][{s1}] -> [{s}] {idx}\n")
                 else:
                     # otherwise this is leaf token, just print it
-                    f.write(f"[{s}] {idx}\n")
-
-    def save_integer(self, file_prefix):
-        """
-        Saves the tokenizer model for integer-based tokens.
-        - model file is the critical one, intended for load()
-        - vocab file is just a pretty printed version for human inspection only
-        """
-        # write the model: to be used in load() later
-        model_file = file_prefix + ".model"
-        with open(model_file, 'w') as f:
-            # write the version, pattern and merges, that's all that's needed
-            f.write("minbpe v1\n") # Consider using a different version if format changes significantly
-            f.write(f"{self.pattern}\n") # Pattern might be less relevant for integers
-            # write the special tokens, first the number of them, then each one
-            f.write(f"{len(self.special_tokens)}\n")
-            for special, idx in self.special_tokens.items():
-                f.write(f"{special} {idx}\n")
-            # the merges dict
-            for idx1, idx2 in self.merges:
-                f.write(f"{idx1} {idx2}\n")
-
-        # write the vocab: for the human to look at
-        vocab_file = file_prefix + ".vocab"
-        inverted_merges = {idx: pair for pair, idx in self.merges.items()}
-        with open(vocab_file, "w", encoding="utf-8") as f:
-            # Assumes self.vocab maps index to its integer representation (e.g., the integer itself)
-            # The exact structure of self.vocab depends on how the integer tokenizer is implemented.
-            for idx, token_representation in self.vocab.items():
-                s = str(token_representation) # Represent the token as a string
-                # find the children of this token, if any
-                if idx in inverted_merges:
-                    # if this token has children, render it nicely as a merge
-                    idx0, idx1 = inverted_merges[idx]
-                    # Assumes self.vocab holds representations for child indices too
-                    s0 = str(self.vocab[idx0])
-                    s1 = str(self.vocab[idx1])
-                    f.write(f"[{s0}][{s1}] -> [{s}] {idx}\n")
-                else:
-                    # otherwise this is a base integer token, just print it
+                    # (this should just be the first 256 tokens, the bytes)
                     f.write(f"[{s}] {idx}\n")
 
     def load(self, model_file):

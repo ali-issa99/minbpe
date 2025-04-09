@@ -9,7 +9,7 @@ Unlike BasicTokenizer:
 - RegexTokenizer handles optional special tokens.
 """
 
-from .base import Tokenizer, get_stats, get_stats_batch, merge
+from .base import Tokenizer, get_stats, merge
 from tqdm import tqdm
 import regex as re
 import os
@@ -76,7 +76,7 @@ class RegexTokenizer(Tokenizer):
 
     def train_character_level_bpe_from_iterator(self, text_iterator, vocab_size, batch_size, max_batches):
         assert vocab_size >= 1
-        num_merges = vocab_size
+        num_merges = vocab_size - 256
         # Initialize merges and vocab
         merges = {}  # (int, int) -> int
         # Process text batches
@@ -157,7 +157,7 @@ class RegexTokenizer(Tokenizer):
 
     def train_from_iterator(self, text_iterator, vocab_size, batch_size, max_batches):
         assert vocab_size >= 1
-        num_merges = vocab_size
+        num_merges = vocab_size - 256
         # Initialize merges and vocab
         merges = {}  # (int, int) -> int
         # Process text batches
@@ -176,14 +176,13 @@ class RegexTokenizer(Tokenizer):
             for text in batch_texts:
                 # Apply regex pattern to split text
                 text_chunks = self.compiled_pattern.findall(text)
-
                 # input text preprocessing
                 ids = [list(ch.encode("utf-8")) for ch in text_chunks]
-                
+
                 all_ids.extend(ids)
 
             # Stop if we've reached the maximum number of batches
-            batch_count += batch_size
+            batch_count += 1
             if max_batches is not None and batch_count >= max_batches:
                 print(f"Reached maximum number of batches ({max_batches})")
                 break
@@ -192,7 +191,7 @@ class RegexTokenizer(Tokenizer):
         
         # Iteratively find and apply merges
         for i in range(num_merges):
-            print(f"\nStarting merge {i+1}/{num_merges}")
+            print(f"\nrtingrting merge {i+1}/{num_merges}")
             # Count the number of times every consecutive pair appears
             stats = {}                
             for chunk_ids in tqdm(all_ids, desc="Computing statistics"):  

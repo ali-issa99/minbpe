@@ -8,6 +8,7 @@ import os
 import time
 from datasets import load_dataset
 from minbpe import RegexTokenizer
+from minbpe.basic import BasicTokenizer
 
 # Create a directory for models if it doesn't exist
 os.makedirs("models", exist_ok=True)
@@ -18,7 +19,7 @@ split='train'
 ds= load_dataset('parquet',data_files='dataset/test/*.parquet')
 
 dataset_size=len(ds[split])
-max_batches=10000
+max_batches=1
 batch_size=10000
 
 def get_training_corpus():
@@ -41,7 +42,7 @@ text_column = "diacritized_text"
 vocab_size = 32768
 # Create the tokenizer
 print(f"Training tokenizer with vocab size {vocab_size}...")
-tokenizer = RegexTokenizer()
+tokenizer = BasicTokenizer()
 
 # Train using the memory-efficient iterator-based approach
 t0 = time.time()
